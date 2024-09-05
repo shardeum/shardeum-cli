@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+const SHARDEUM_RPC_URL = "https://atomium.shardeum.org"
+
 /*
 Usage: index [options] [command]
 
@@ -32,6 +34,8 @@ Commands:
   eth-get-block-by-number <blockNumber>                    Get block information by block number
   eth-get-transaction-by-hash <txHash>                     Get transaction information by transaction hash
   eth-get-transaction-receipt <txHash>                     Get transaction receipt by transaction hash
+  set-rpc-url <url>                                        Set the RPC URL (default: https://atomium.shardeum.org)
+  get-rpc-url                                              Get the current RPC URL
   help [command]                                           display help for command
 
 example: npx ts-node src/index.ts eth-gas-price
@@ -62,7 +66,7 @@ if (!fs.existsSync(configDir)) {
 let web3: Web3
 
 function initWeb3() {
-    const rpcUrl = process.env.SHARDEUM_RPC_URL || "https://atomium.shardeum.org"
+    const rpcUrl = getConfig("rpcUrl") || SHARDEUM_RPC_URL
     web3 = new Web3(new Web3.providers.HttpProvider(rpcUrl))
 }
 
@@ -97,39 +101,37 @@ function displayResult(result: any) {
 
 // Add this color utility object
 const colors = {
-  red: (text: string) => `\x1b[31m${text}\x1b[0m`,
-  yellow: (text: string) => `\x1b[33m${text}\x1b[0m`,
-  cyan: (text: string) => `\x1b[36m${text}\x1b[0m`,
-  gray: (text: string) => `\x1b[90m${text}\x1b[0m`,
-};
+    red: (text: string) => `\x1b[31m${text}\x1b[0m`,
+    yellow: (text: string) => `\x1b[33m${text}\x1b[0m`,
+    cyan: (text: string) => `\x1b[36m${text}\x1b[0m`,
+    gray: (text: string) => `\x1b[90m${text}\x1b[0m`,
+}
 
-let debugMode = false;
+let debugMode = false
 
-program
-  .option('--debug', 'Enable debug mode')
-  .hook('preAction', (thisCommand) => {
-    debugMode = thisCommand.opts().debug;
-  });
+program.option("--debug", "Enable debug mode").hook("preAction", (thisCommand) => {
+    debugMode = thisCommand.opts().debug
+})
 
 function handleError(error: any) {
-  console.error(colors.red('Error occurred:'));
-  if (error.cause) {
-    console.error(colors.yellow(`  Code: ${error.cause.code}`));
-    console.error(colors.yellow(`  Message: ${error.cause.message}`));
-  } else {
-    console.error(colors.yellow(`  ${error.message || 'Unknown error'}`));
-  }
-  if (error.request) {
-    console.error(colors.cyan('Request details:'));
-    console.error(colors.cyan(`  Method: ${error.request.method}`));
-    console.error(colors.cyan(`  Params: ${JSON.stringify(error.request.params)}`));
-  }
-  if (debugMode) {
-    console.error(colors.gray('Stack trace:'));
-    console.error(colors.gray(error.stack));
-  } else {
-    console.error(colors.gray('For more details, run with --debug flag'));
-  }
+    console.error(colors.red("Error occurred:"))
+    if (error.cause) {
+        console.error(colors.yellow(`  Code: ${error.cause.code}`))
+        console.error(colors.yellow(`  Message: ${error.cause.message}`))
+    } else {
+        console.error(colors.yellow(`  ${error.message || "Unknown error"}`))
+    }
+    if (error.request) {
+        console.error(colors.cyan("Request details:"))
+        console.error(colors.cyan(`  Method: ${error.request.method}`))
+        console.error(colors.cyan(`  Params: ${JSON.stringify(error.request.params)}`))
+    }
+    if (debugMode) {
+        console.error(colors.gray("Stack trace:"))
+        console.error(colors.gray(error.stack))
+    } else {
+        console.error(colors.gray("For more details, run with --debug flag"))
+    }
 }
 
 async function runBenchmark(fn: () => Promise<any>, iterations: number) {
@@ -640,6 +642,23 @@ program
         } else {
             await fn()
         }
+    })
+
+program
+    .command("set-rpc-url <url>")
+    .description("Set the RPC URL (default: " + SHARDEUM_RPC_URL + ")")
+    .action((url) => {
+        saveConfig("rpcUrl", url)
+        console.log(`RPC URL set to: ${url}`)
+    })
+
+// Add this near the end of the file, before program.parse(process.argv)
+program
+    .command("get-rpc-url")
+    .description("Get the current RPC URL")
+    .action(() => {
+        const rpcUrl = getConfig("rpcUrl") || SHARDEUM_RPC_URL
+        console.log(`Current RPC URL: ${rpcUrl}`)
     })
 
 program.parse(process.argv)
