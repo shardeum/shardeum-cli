@@ -91,10 +91,14 @@ function displayResult(result: any) {
     const table = new Table()
     if (typeof result === "object") {
         Object.entries(result).forEach(([key, value]) => {
-            table.push([key.toString(), value?.toString() ?? ""])
+            const truncatedValue = value?.toString().slice(0, 120) ?? ""
+            const displayValue = truncatedValue.length === 120 ? truncatedValue + "..." : truncatedValue
+            table.push([key.toString(), displayValue])
         })
     } else {
-        table.push(["Result", result?.toString() ?? ""])
+        const truncatedResult = result?.toString().slice(0, 120) ?? ""
+        const displayResult = truncatedResult.length === 120 ? truncatedResult + "..." : truncatedResult
+        table.push(["Result", displayResult])
     }
     console.log(table.toString())
 }
