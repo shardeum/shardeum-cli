@@ -1,10 +1,11 @@
 import { Command } from "commander"
 import { createPublicClient, createWalletClient, http, formatEther, parseEther, parseGwei } from "viem"
-import { privateKeyToAccount } from "viem/accounts"
+import { privateKeyToAccount, generatePrivateKey } from "viem/accounts"
 import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
 import Table from "cli-table3"
+import pc from 'picocolors'  // Replace chalk import
 
 const CONFIG_DIR = path.join(os.homedir(), ".shardeum-cli")
 const CONFIG_PATH = path.join(CONFIG_DIR, "config")
@@ -394,4 +395,291 @@ program
         }
     })
 
+// Add these utility functions before the CLI commands
+interface TestStats {
+    sendTransaction: { success: number; error: number };
+    getTransactionCount: { success: number; error: number };
+    getBalance: { success: number; error: number };
+    blockNumber: { success: number; error: number };
+    getTransactionByHash: { success: number; error: number };
+}
+
+const createTestAccounts = () => {
+    return Array(4).fill(0).map(() => {
+        const privateKey = generatePrivateKey()
+        return privateKeyToAccount(privateKey)
+    })
+}
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+interface QueuedRequest {
+    type: keyof TestStats;
+    operation: () => Promise<void>;
+}
+
+const updateStats = (stats: TestStats, lines: number) => {
+    // Find the longest key length for padding
+    const maxKeyLength = Math.max(...Object.keys(stats).map(k => k.length))
+    
+    process.stdout.write(`\x1b[${lines - 1}A\x1b[0J`)
+    console.log("Test Progress:")
+    Object.entries(stats).forEach(([key, value]) => {
+        const paddedKey = key.padEnd(maxKeyLength)
+        const successText = pc.green(value.success.toString())
+        const errorText = pc.red(value.error.toString())
+        console.log(`${paddedKey}: ${successText} / ${errorText}`)
+    })
+}
+
+// Add this before the test:network command
+interface AccountNonce {
+    [address: string]: number;
+}
+
+const initializeNonces = async (
+    client: ReturnType<typeof createPublicClient>,
+    accounts: ReturnType<typeof privateKeyToAccount>[]
+): Promise<AccountNonce> => {
+    const nonces: AccountNonce = {};
+    await Promise.all(
+        accounts.map(async (account) => {
+            nonces[account.address] = await client.getTransactionCount({
+                address: account.address,
+            });
+        })
+    );
+    return nonces;
+};
+
+// Add the test command
+program
+    .command("test:network")
+    .description("Run network test")
+    .requiredOption("-t, --tps <number>", "Transactions per second")
+    .requiredOption("-d, --duration <seconds>", "Test duration in seconds")
+    .action(async (options) => {
+        try {
+            const config = loadConfig()
+            if (!config.privateKey) {
+                throw new Error("Private key not configured")
+            }
+
+            const tps = parseInt(options.tps)
+            const duration = parseInt(options.duration)
+            const requestsPerTick = Math.ceil(tps / 4)
+            const mainAccount = privateKeyToAccount(`0x${config.privateKey.replace("0x", "")}`)
+            const testAccounts = createTestAccounts()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const walletClient = createWalletClient({
+                account: mainAccount,
+                transport: http(config.rpcUrl),
+            })
+
+            // Initialize test accounts with some funds
+            console.log("\n=== Initializing Test Accounts ===")
+            for (const account of testAccounts) {
+                try {
+                    const hash = await walletClient.sendTransaction({
+                        to: account.address,
+                        value: parseEther("0.01"),
+                        chain: null,
+                    })
+                    console.log(`Funded ${account.address} (tx: ${hash})`)
+                    await wait(1000) // Wait for transaction to be processed
+                } catch (error) {
+                    console.error(`Failed to fund ${account.address}:`, error)
+                }
+            }
+
+            // Rest of initialization code remains the same...
+            console.log("\n=== Initializing Nonces ===")
+            const nonceManager = new NonceManager();
+            await nonceManager.initialize(client, [...testAccounts, mainAccount]);
+
+            console.log("\n=== Starting Network Test ===")
+            // ...existing logging code...
+
+            const stats: TestStats = {
+                sendTransaction: { success: 0, error: 0 },
+                getTransactionCount: { success: 0, error: 0 },
+                getBalance: { success: 0, error: 0 },
+                blockNumber: { success: 0, error: 0 },
+                getTransactionByHash: { success: 0, error: 0 }
+            }
+
+            // Initialize display
+            Object.entries(stats).forEach(() => console.log())
+            const statsLines = Object.keys(stats).length + 2
+
+            let lastStatsUpdate = Date.now()
+            const startTime = Date.now()
+            const endTime = startTime + (duration * 1000)
+
+            // Modified request execution
+            while (Date.now() < endTime) {
+                const batchPromises = []
+                for (let i = 0; i < requestsPerTick; i++) {
+                    const targetAccount = testAccounts[Math.floor(Math.random() * testAccounts.length)]
+                    const senderAccount = testAccounts[Math.floor(Math.random() * testAccounts.length)]
+                    const operations: QueuedRequest[] = []
+
+                    // Add a transaction
+                    operations.push({
+                        type: 'sendTransaction' as keyof TestStats,
+                        operation: async () => {
+                            const senderClient = createWalletClient({
+                                account: senderAccount,
+                                transport: http(config.rpcUrl),
+                            })
+                            const nonce = await nonceManager.getNextNonce(senderAccount.address)
+                            await senderClient.sendTransaction({
+                                to: targetAccount.address,
+                                value: parseEther("0.0001"),
+                                chain: null,
+                                nonce
+                            })
+                        }
+                    })
+
+                    // Add a random additional operation
+                    const op = Math.floor(Math.random() * 4)
+                    switch (op) {
+                        case 0:
+                            operations.push({
+                                type: 'getTransactionCount' as keyof TestStats,
+                                operation: () => client.getTransactionCount({ address: targetAccount.address }).then(() => {})
+                            })
+                            break
+                        case 1:
+                            operations.push({
+                                type: 'getBalance' as keyof TestStats,
+                                operation: () => client.getBalance({ address: targetAccount.address }).then(() => {})
+                            })
+                            break
+                        case 2:
+                            operations.push({
+                                type: 'blockNumber' as keyof TestStats,
+                                operation: () => client.getBlockNumber().then(() => {})
+                            })
+                            break
+                        case 3:
+                            operations.push({
+                                type: 'getTransactionByHash' as keyof TestStats,
+                                operation: async () => {
+                                    const senderClient = createWalletClient({
+                                        account: senderAccount,
+                                        transport: http(config.rpcUrl),
+                                    })
+                                    const nonce = await nonceManager.getNextNonce(senderAccount.address)
+                                    const hash = await senderClient.sendTransaction({
+                                        to: targetAccount.address,
+                                        value: parseEther("0.0001"),
+                                        chain: null,
+                                        nonce
+                                    })
+                                    await client.getTransaction({ hash })
+                                }
+                            })
+                            break
+                    }
+
+                    // Execute operations
+                    for (const { type, operation } of operations) {
+                        batchPromises.push(
+                            operation()
+                                .then(() => { stats[type].success++ })
+                                .catch(() => { stats[type].error++ })
+                        )
+                    }
+                }
+
+                // Wait for batch to complete
+                await Promise.allSettled(batchPromises)
+
+                // Update stats display
+                const now = Date.now()
+                if (now - lastStatsUpdate >= 1000) {
+                    updateStats(stats, statsLines)
+                    lastStatsUpdate = now
+                }
+
+                // Add small delay to prevent overwhelming the node
+                await wait(250)
+            }
+
+            // Rest of cleanup code remains the same...
+            console.log("\n=== Test Complete ===")
+            console.log("Returning balances to main account...")
+
+            // Return balances
+            for (const account of testAccounts) {
+                try {
+                    const balance = await client.getBalance({ address: account.address })
+                    if (balance > 0) {
+                        const gasPrice = await client.getGasPrice()
+                        const gasLimit = 21000
+                        const gasCost = gasPrice * BigInt(gasLimit)
+                        const transferAmount = balance - gasCost
+
+                        if (transferAmount > 0) {
+                            const nonce = await nonceManager.getNextNonce(account.address)
+                            const hash = await walletClient.sendTransaction({
+                                to: mainAccount.address,
+                                value: transferAmount,
+                                account,
+                                chain: null,
+                                nonce
+                            })
+                            console.log(`Returned ${formatEther(transferAmount)} ETH from ${account.address}`)
+                        }
+                    }
+                } catch (error) {
+                    if (error instanceof Error) {
+                        console.error(`Failed to return balance from ${account.address}:`, error.message)
+                    } else {
+                        console.error(`Failed to return balance from ${account.address}:`, error)
+                    }
+                }
+            }
+
+            const finalBalance = await client.getBalance({ address: mainAccount.address })
+            console.log(`\nMain account final balance: ${formatEther(finalBalance)} ETH`)
+
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
 program.parse(process.argv)
+
+class NonceManager {
+    private nonces: { [address: string]: number } = {};
+    private locks: { [address: string]: Promise<void> } = {};
+
+    async initialize(client: ReturnType<typeof createPublicClient>, accounts: ReturnType<typeof privateKeyToAccount>[]) {
+        await Promise.all(accounts.map(async (account) => {
+            this.nonces[account.address] = await client.getTransactionCount({
+                address: account.address,
+            });
+            this.locks[account.address] = Promise.resolve();
+        }));
+    }
+
+    async getNextNonce(address: string): Promise<number> {
+        // Wait for any pending operations on this address
+        await this.locks[address];
+        
+        // Create a new lock
+        let resolveLock!: () => void;
+        const newLock = new Promise<void>(resolve => { resolveLock = resolve; });
+        this.locks[address] = newLock;
+
+        try {
+            const nonce = this.nonces[address]++;
+            return nonce;
+        } finally {
+            resolveLock();
+        }
+    }
+}
