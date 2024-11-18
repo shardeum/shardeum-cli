@@ -1,668 +1,397 @@
-#!/usr/bin/env node
-
-const SHARDEUM_RPC_URL = "https://atomium.shardeum.org"
-
-/*
-Usage: index [options] [command]
-
-Shardeum CLI
-
-Options:
-  --debug                                                  Enable debug mode
-  -V, --version                                            output the version number
-  -h, --help                                               display help for command
-
-Commands:
-  set-private-key <key>                                    Set the private key
-  set-public-key <key>                                     Set the public key
-  get-balance <address>                                    Get balance for an address
-  web3-client-version                                      Get web3 client version
-  net-version                                              Get network version
-  web3-sha3 <data>                                         Get web3 sha3 hash of data
-  eth-chain-id                                             Get Ethereum chain ID
-  eth-gas-price                                            Get current gas price
-  eth-accounts                                             Get list of accounts
-  eth-block-number                                         Get latest block number
-  eth-get-storage-at <address> <position>                  Get storage at a given address and position
-  eth-get-transaction-count <address>                      Get transaction count for an address
-  eth-get-block-transaction-count-by-hash <blockHash>      Get transaction count in a block by block hash
-  eth-get-block-transaction-count-by-number <blockNumber>  Get transaction count in a block by block number
-  eth-send-transaction <to> <value>                        Send a transaction
-  eth-call <to> <data>                                     Execute a new message call
-  eth-estimate-gas <to> <data>                             Estimate gas for a transaction
-  eth-get-block-by-hash <blockHash>                        Get block information by block hash
-  eth-get-block-by-number <blockNumber>                    Get block information by block number
-  eth-get-transaction-by-hash <txHash>                     Get transaction information by transaction hash
-  eth-get-transaction-receipt <txHash>                     Get transaction receipt by transaction hash
-  set-rpc-url <url>                                        Set the RPC URL (default: https://atomium.shardeum.org)
-  get-rpc-url                                              Get the current RPC URL
-  help [command]                                           display help for command
-
-example: npx ts-node src/index.ts eth-gas-price
-
-Benchmark examples:
-  npx ts-node src/index.ts eth-gas-price --benchmark 5
-  npx ts-node src/index.ts eth-get-block-by-number 1000000 --benchmark 10
-*/
-
-import { program } from "commander"
+import { Command } from "commander"
+import { createPublicClient, createWalletClient, http, formatEther, parseEther, parseGwei } from "viem"
+import { privateKeyToAccount } from "viem/accounts"
 import * as fs from "fs"
-import * as path from "path"
 import * as os from "os"
-import Web3 from "web3"
+import * as path from "path"
 import Table from "cli-table3"
-import dotenv from "dotenv"
-import { performance } from "perf_hooks"
 
-dotenv.config()
+const CONFIG_DIR = path.join(os.homedir(), ".shardeum-cli")
+const CONFIG_PATH = path.join(CONFIG_DIR, "config")
 
-const configDir = path.join(os.homedir(), ".shardeum-cli")
-const configFile = path.join(configDir, "config")
-
-if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir)
+// Utility functions
+const truncateString = (str: string, maxLength: number = 122): string => {
+    return str.length > (maxLength - 2) ? `${str.substring(0, maxLength)}..` : str
 }
 
-let web3: Web3
+const formatOutput = (data: any): void => {
+    const table = new Table({
+        head: ["Property", "Value"],
+    })
 
-function initWeb3() {
-    const rpcUrl = getConfig("rpcUrl") || SHARDEUM_RPC_URL
-    web3 = new Web3(new Web3.providers.HttpProvider(rpcUrl))
-}
-
-function saveConfig(key: string, value: string) {
-    let config: any = {}
-    if (fs.existsSync(configFile)) {
-        config = JSON.parse(fs.readFileSync(configFile, "utf8"))
+    const formatValue = (value: any): string => {
+        if (typeof value === "string") return truncateString(value)
+        if (typeof value === "bigint") return value.toString()
+        if (typeof value === "object" && value !== null) {
+            // Convert any BigInt properties to strings in objects
+            return JSON.stringify(value, (_, v) => 
+                typeof v === "bigint" ? v.toString() : v
+            )
+        }
+        return JSON.stringify(value)
     }
-    config[key] = value
-    fs.writeFileSync(configFile, JSON.stringify(config, null, 2))
-}
 
-function getConfig(key: string): string | undefined {
-    if (fs.existsSync(configFile)) {
-        const config = JSON.parse(fs.readFileSync(configFile, "utf8"))
-        return config[key]
-    }
-    return undefined
-}
-
-function displayResult(result: any) {
-    const table = new Table()
-    if (typeof result === "object") {
-        Object.entries(result).forEach(([key, value]) => {
-            const truncatedValue = value?.toString().slice(0, 120) ?? ""
-            const displayValue = truncatedValue.length === 120 ? truncatedValue + "..." : truncatedValue
-            table.push([key.toString(), displayValue])
+    if (typeof data === "object") {
+        Object.entries(data).forEach(([key, value]) => {
+            table.push([key, formatValue(value)])
         })
     } else {
-        const truncatedResult = result?.toString().slice(0, 120) ?? ""
-        const displayResult = truncatedResult.length === 120 ? truncatedResult + "..." : truncatedResult
-        table.push(["Result", displayResult])
+        table.push(["Result", formatValue(data)])
     }
+    
     console.log(table.toString())
 }
 
-// Add this color utility object
-const colors = {
-    red: (text: string) => `\x1b[31m${text}\x1b[0m`,
-    yellow: (text: string) => `\x1b[33m${text}\x1b[0m`,
-    cyan: (text: string) => `\x1b[36m${text}\x1b[0m`,
-    gray: (text: string) => `\x1b[90m${text}\x1b[0m`,
+const handleError = (error: any): void => {
+    const table = new Table({
+        head: ["Error Detail", "Value"],
+        colWidths: [30, 120],
+    })
+
+    table.push(
+        ["Message", error.message || "Unknown error"],
+        ["Code", error.code || "N/A"],
+        ["Reason", error.reason || "N/A"],
+        ["Details", error.details || "N/A"]
+    )
+
+    console.error(table.toString())
 }
 
-let debugMode = false
-
-program.option("--debug", "Enable debug mode").hook("preAction", (thisCommand) => {
-    debugMode = thisCommand.opts().debug
-})
-
-function handleError(error: any) {
-    console.error(colors.red("Error occurred:"))
-    if (error.cause) {
-        console.error(colors.yellow(`  Code: ${error.cause.code}`))
-        console.error(colors.yellow(`  Message: ${error.cause.message}`))
-    } else {
-        console.error(colors.yellow(`  ${error.message || "Unknown error"}`))
-    }
-    if (error.request) {
-        console.error(colors.cyan("Request details:"))
-        console.error(colors.cyan(`  Method: ${error.request.method}`))
-        console.error(colors.cyan(`  Params: ${JSON.stringify(error.request.params)}`))
-    }
-    if (debugMode) {
-        console.error(colors.gray("Stack trace:"))
-        console.error(colors.gray(error.stack))
-    } else {
-        console.error(colors.gray("For more details, run with --debug flag"))
+// Configuration management
+const loadConfig = (): { rpcUrl: string; privateKey: string } => {
+    const defaultConfig = { rpcUrl: "https://atomium.shardeum.org", privateKey: "" }
+    if (!fs.existsSync(CONFIG_PATH)) return defaultConfig
+    try {
+        return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"))
+    } catch {
+        return defaultConfig
     }
 }
 
-async function runBenchmark(fn: () => Promise<any>, iterations: number) {
-    const times: number[] = []
-    for (let i = 0; i < iterations; i++) {
-        const start = performance.now()
+const saveConfig = (config: Partial<{ rpcUrl: string; privateKey: string }>): void => {
+    if (!fs.existsSync(CONFIG_DIR)) {
+        fs.mkdirSync(CONFIG_DIR, { recursive: true })
+    }
+    const currentConfig = loadConfig()
+    const newConfig = { ...currentConfig, ...config }
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(newConfig, null, 2))
+}
+
+// CLI Program
+const program = new Command()
+
+// Configuration commands
+program
+    .command("config:set-rpc")
+    .description("Set RPC URL")
+    .argument("<url>", "RPC URL")
+    .action((url) => {
+        saveConfig({ rpcUrl: url })
+        formatOutput({ status: "RPC URL updated", url })
+    })
+
+program
+    .command("config:set-key")
+    .description("Set private key")
+    .argument("<key>", "Private key")
+    .action((key) => {
+        saveConfig({ privateKey: key })
+        formatOutput({ status: "Private key updated" })
+    })
+
+// Ethereum JSON-RPC commands
+program
+    .command("eth:blockNumber")
+    .description("Get the latest block number")
+    .action(async () => {
         try {
-            await fn()
-            const end = performance.now()
-            times.push(end - start)
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const result = await client.getBlockNumber()
+            formatOutput({ blockNumber: result.toString() })
         } catch (error) {
             handleError(error)
-            return // Exit the benchmark if an error occurs
         }
-    }
-    times.sort((a, b) => a - b)
-    const fastest = times[0]
-    const slowest = times[times.length - 1]
-    const p95 = times[Math.floor(times.length * 0.95)]
-
-    console.log(`Benchmark results (${iterations} iterations):`)
-    console.log(`Fastest: ${fastest.toFixed(2)}ms`)
-    console.log(`Slowest: ${slowest.toFixed(2)}ms`)
-    console.log(`P95: ${p95.toFixed(2)}ms`)
-}
-
-function parseBenchmarkOption(): number | undefined {
-    const benchmarkIndex = process.argv.indexOf("--benchmark")
-    if (benchmarkIndex > -1 && benchmarkIndex < process.argv.length - 1) {
-        const iterations = parseInt(process.argv[benchmarkIndex + 1])
-        if (!isNaN(iterations)) {
-            // Remove the benchmark option and its value from argv
-            process.argv.splice(benchmarkIndex, 2)
-            return iterations
-        }
-    }
-    return undefined
-}
-
-const benchmarkIterations = parseBenchmarkOption()
-
-program.version("1.0.0").description("Shardeum CLI")
-
-program
-    .command("set-private-key <key>")
-    .description("Set the private key")
-    .action((key) => {
-        saveConfig("privateKey", key)
-        console.log("Private key saved.")
     })
 
 program
-    .command("set-public-key <key>")
-    .description("Set the public key")
-    .action((key) => {
-        saveConfig("publicKey", key)
-        console.log("Public key saved.")
-    })
-
-program
-    .command("get-balance <address>")
+    .command("eth:getBalance")
     .description("Get balance for an address")
+    .argument("<address>", "Ethereum address")
     .action(async (address) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const balance = await web3.eth.getBalance(address)
-                if (!benchmarkIterations) {
-                    displayResult({ address, balance: web3.utils.fromWei(balance, "ether") + " SHM" })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const balance = await client.getBalance({ address })
+            formatOutput({
+                address,
+                balance: formatEther(balance),
+            })
+        } catch (error) {
+            handleError(error)
         }
     })
 
+// eth_getStorageAt
 program
-    .command("web3-client-version")
-    .description("Get web3 client version")
+    .command("eth:getStorageAt")
+    .description("Get storage value at address and position")
+    .argument("<address>", "Contract address")
+    .argument("<position>", "Storage position")
+    .action(async (address, position) => {
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const storage = await client.getStorageAt({ address, slot: position })
+            formatOutput({ address, position, storage })
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
+// eth_getTransactionCount
+program
+    .command("eth:getTransactionCount")
+    .description("Get transaction count for address")
+    .argument("<address>", "Account address")
+    .action(async (address) => {
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const count = await client.getTransactionCount({ address })
+            formatOutput({ address, transactionCount: count.toString() })
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
+// eth_getCode
+program
+    .command("eth:getCode")
+    .description("Get code at address")
+    .argument("<address>", "Contract address")
+    .action(async (address) => {
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const code = await client.getBytecode({ address })
+            formatOutput({ address, code })
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
+// eth_call
+program
+    .command("eth:call")
+    .description("Execute contract call")
+    .requiredOption("-t, --to <address>", "Contract address")
+    .requiredOption("-d, --data <data>", "Call data")
+    .option("-f, --from <address>", "From address")
+    .action(async (options) => {
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const result = await client.call({
+                to: options.to,
+                data: options.data,
+                ...(options.from && { from: options.from }),
+            })
+            formatOutput({ result: result.data })
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
+// eth_estimateGas
+program
+    .command("eth:estimateGas")
+    .description("Estimate gas for transaction")
+    .requiredOption("-t, --to <address>", "To address")
+    .requiredOption("-d, --data <data>", "Transaction data")
+    .option("-f, --from <address>", "From address")
+    .option("-v, --value <value>", "Value in wei")
+    .action(async (options) => {
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const gasEstimate = await client.estimateGas({
+                to: options.to,
+                data: options.data,
+                ...(options.from && { from: options.from }),
+                ...(options.value && { value: BigInt(options.value) }),
+            })
+            formatOutput({ gasEstimate: gasEstimate.toString() })
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
+// Block and Transaction related commands
+program
+    .command("eth:getBlockTransactionCountByHash")
+    .description("Get block transaction count by hash")
+    .argument("<hash>", "Block hash")
+    .action(async (hash) => {
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const count = await client.request({
+                method: "eth_getBlockTransactionCountByHash",
+                params: [hash],
+            })
+            formatOutput({ blockHash: hash, transactionCount: Number(count) })
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
+
+
+// Add remaining block and transaction commands
+const blockCommands = [
+    {
+        name: "eth:getBlockByHash",
+        description: "Get block by hash",
+        method: "getBlock",
+        params: (hash: string) => ({ blockHash: hash }),
+    },
+    {
+        name: "eth:getBlockByNumber",
+        description: "Get block by number",
+        method: "getBlock",
+        params: (number: string) => ({ blockNumber: BigInt(number) }),
+    },
+    {
+        name: "eth:getTransactionByHash",
+        description: "Get transaction by hash",
+        method: "getTransaction",
+        params: (hash: string) => ({ hash }),
+    },
+]
+
+blockCommands.forEach(({ name, description, method, params }) => {
+    program
+        .command(name)
+        .description(description)
+        .argument("<value>", "Hash or block number")
+        .action(async (value) => {
+            try {
+                const config = loadConfig()
+                const client = createPublicClient({ transport: http(config.rpcUrl) })
+                const result = await (client as any)[method](params(value))
+                formatOutput(result)
+            } catch (error) {
+                handleError(error)
+            }
+        })
+})
+
+// Network and utility commands
+program
+    .command("web3:clientVersion")
+    .description("Get client version")
     .action(async () => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const version = await web3.eth.getNodeInfo()
-                if (!benchmarkIterations) {
-                    displayResult({ version })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const version = await client.request({ method: "web3_clientVersion" })
+            formatOutput({ clientVersion: version })
+        } catch (error) {
+            handleError(error)
         }
     })
 
 program
-    .command("net-version")
+    .command("web3:sha3")
+    .description("Calculate Keccak-256 hash")
+    .argument("<data>", "Data to hash")
+    .action(async (data) => {
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const hash = await client.request({
+                method: "web3_sha3",
+                params: [data],
+            })
+            formatOutput({ input: data, hash })
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
+program
+    .command("net:version")
     .description("Get network version")
     .action(async () => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const version = await web3.eth.net.getId()
-                if (!benchmarkIterations) {
-                    displayResult({ version })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const version = await client.request({ method: "net_version" })
+            formatOutput({ networkVersion: version })
+        } catch (error) {
+            handleError(error)
         }
     })
 
 program
-    .command("web3-sha3 <data>")
-    .description("Get web3 sha3 hash of data")
-    .action((data) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const hash = web3.utils.sha3(data)
-                if (!benchmarkIterations) {
-                    displayResult({ hash })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            runBenchmark(fn, benchmarkIterations)
-        } else {
-            fn()
-        }
-    })
-
-program
-    .command("eth-chain-id")
-    .description("Get Ethereum chain ID")
+    .command("eth:protocolVersion")
+    .description("Get Ethereum protocol version")
     .action(async () => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const chainId = await web3.eth.getChainId()
-                if (!benchmarkIterations) {
-                    displayResult({ chainId })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
+        try {
+            const config = loadConfig()
+            const client = createPublicClient({ transport: http(config.rpcUrl) })
+            const version = await client.request({ method: "eth_protocolVersion" })
+            formatOutput({ protocolVersion: version })
+        } catch (error) {
+            handleError(error)
         }
     })
 
 program
-    .command("eth-gas-price")
-    .description("Get current gas price")
-    .action(async () => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const gasPrice = await web3.eth.getGasPrice()
-                if (!benchmarkIterations) {
-                    displayResult({ gasPrice: web3.utils.fromWei(gasPrice, "gwei") + " Gwei" })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-accounts")
-    .description("Get list of accounts")
-    .action(async () => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const accounts = await web3.eth.getAccounts()
-                if (!benchmarkIterations) {
-                    displayResult({ accounts })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-block-number")
-    .description("Get latest block number")
-    .action(async () => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const blockNumber = await web3.eth.getBlockNumber()
-                if (!benchmarkIterations) {
-                    displayResult({ blockNumber })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-get-storage-at <address> <position>")
-    .description("Get storage at a given address and position")
-    .action(async (address, position) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const storage = await web3.eth.getStorageAt(address, position)
-                if (!benchmarkIterations) {
-                    displayResult({ address, position, storage })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-get-transaction-count <address>")
-    .description("Get transaction count for an address")
-    .action(async (address) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const count = await web3.eth.getTransactionCount(address)
-                if (!benchmarkIterations) {
-                    displayResult({ address, transactionCount: count })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-get-block-transaction-count-by-hash <blockHash>")
-    .description("Get transaction count in a block by block hash")
-    .action(async (blockHash) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const count = await web3.eth.getBlockTransactionCount(blockHash)
-                if (!benchmarkIterations) {
-                    displayResult({ blockHash, transactionCount: count })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-get-block-transaction-count-by-number <blockNumber>")
-    .description("Get transaction count in a block by block number")
-    .action(async (blockNumber) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const count = await web3.eth.getBlockTransactionCount(blockNumber)
-                if (!benchmarkIterations) {
-                    displayResult({ blockNumber, transactionCount: count })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-send-transaction <to> <value>")
+    .command("eth:sendTransaction")
     .description("Send a transaction")
-    .action(async (to, value) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const privateKey = getConfig("privateKey")
-                if (!privateKey) {
-                    console.error("Private key not set. Use set-private-key command first.")
-                    return
-                }
-                const account = web3.eth.accounts.privateKeyToAccount(privateKey)
-                web3.eth.accounts.wallet.add(account)
-                web3.eth.defaultAccount = account.address
-
-                const tx = {
-                    from: account.address,
-                    to,
-                    value: web3.utils.toWei(value, "ether"),
-                    gas: 21000,
-                }
-
-                const receipt = await web3.eth.sendTransaction(tx)
-                if (!benchmarkIterations) {
-                    displayResult(receipt)
-                }
-            } catch (error) {
-                handleError(error)
+    .requiredOption("-t, --to <address>", "To address")
+    .option("-v, --value <value>", "Value in ether")
+    .option("-d, --data <data>", "Transaction data")
+    .option("-g, --gas <limit>", "Gas limit")
+    .option("-p, --gasPrice <price>", "Gas price in gwei")
+    .option("-n, --nonce <nonce>", "Nonce value")
+    .action(async (options) => {
+        try {
+            const config = loadConfig()
+            if (!config.privateKey) {
+                throw new Error("Private key not configured. Use config:set-key to set it.")
             }
-        }
 
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
+            const account = privateKeyToAccount(`0x${config.privateKey.replace("0x", "")}`)
+            const client = createWalletClient({
+                account,
+                transport: http(config.rpcUrl)
+            })
 
-program
-    .command("eth-call <to> <data>")
-    .description("Execute a new message call")
-    .action(async (to, data) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const result = await web3.eth.call({ to, data })
-                if (!benchmarkIterations) {
-                    displayResult({ result })
-                }
-            } catch (error) {
-                handleError(error)
+            const transaction = {
+                to: options.to,
+                ...(options.value && { value: parseEther(options.value) }),
+                ...(options.data && { data: options.data }),
+                ...(options.gas && { gas: BigInt(options.gas) }),
+                ...(options.gasPrice && { gasPrice: parseGwei(options.gasPrice) }),
+                ...(options.nonce && { nonce: Number(options.nonce) })
             }
+
+            const hash = await client.sendTransaction(transaction)
+            formatOutput({
+                transactionHash: hash,
+                from: account.address,
+                ...transaction,
+                ...(transaction.value && { 
+                    value: `${options.value} ETH (${transaction.value.toString()} wei)`
+                })
+            })
+        } catch (error) {
+            handleError(error)
         }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-estimate-gas <to> <data>")
-    .description("Estimate gas for a transaction")
-    .action(async (to, data) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const gasEstimate = await web3.eth.estimateGas({ to, data })
-                if (!benchmarkIterations) {
-                    displayResult({ gasEstimate })
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-get-block-by-hash <blockHash>")
-    .description("Get block information by block hash")
-    .action(async (blockHash) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const block = await web3.eth.getBlock(blockHash)
-                if (!benchmarkIterations) {
-                    displayResult(block)
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-get-block-by-number <blockNumber>")
-    .description("Get block information by block number")
-    .action(async (blockNumber) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const block = await web3.eth.getBlock(blockNumber)
-                if (!benchmarkIterations) {
-                    displayResult(block)
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-get-transaction-by-hash <txHash>")
-    .description("Get transaction information by transaction hash")
-    .action(async (txHash) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const tx = await web3.eth.getTransaction(txHash)
-                if (!benchmarkIterations) {
-                    displayResult(tx)
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("eth-get-transaction-receipt <txHash>")
-    .description("Get transaction receipt by transaction hash")
-    .action(async (txHash) => {
-        initWeb3()
-        const fn = async () => {
-            try {
-                const receipt = await web3.eth.getTransactionReceipt(txHash)
-                if (!benchmarkIterations) {
-                    displayResult(receipt)
-                }
-            } catch (error) {
-                handleError(error)
-            }
-        }
-
-        if (benchmarkIterations) {
-            await runBenchmark(fn, benchmarkIterations)
-        } else {
-            await fn()
-        }
-    })
-
-program
-    .command("set-rpc-url <url>")
-    .description("Set the RPC URL (default: " + SHARDEUM_RPC_URL + ")")
-    .action((url) => {
-        saveConfig("rpcUrl", url)
-        console.log(`RPC URL set to: ${url}`)
-    })
-
-// Add this near the end of the file, before program.parse(process.argv)
-program
-    .command("get-rpc-url")
-    .description("Get the current RPC URL")
-    .action(() => {
-        const rpcUrl = getConfig("rpcUrl") || SHARDEUM_RPC_URL
-        console.log(`Current RPC URL: ${rpcUrl}`)
     })
 
 program.parse(process.argv)
