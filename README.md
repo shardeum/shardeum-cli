@@ -42,6 +42,8 @@ Commands:
   eth:protocolVersion                        Get Ethereum protocol version
   eth:sendTransaction [options]              Send a transaction
   test:network [options]                     Run network test
+  shm:stake [options]                        Stake SHM tokens
+  shm:unstake [options]                      Unstake SHM tokens
   help [command]                             display help for command
 
 ```

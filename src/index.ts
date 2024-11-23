@@ -651,6 +651,98 @@ program
         }
     })
 
+program
+    .command("shm:stake")
+    .description("Stake SHM tokens")
+    .requiredOption("-a, --amount <amount>", "Amount of SHM to stake")
+    .requiredOption("-n, --node <publicKey>", "Node's public key")
+    .action(async (options) => {
+        try {
+            const config = loadConfig()
+            if (!config.privateKey) {
+                throw new Error("Private key not configured. Use config:set-key to set it.")
+            }
+
+            const account = privateKeyToAccount(`0x${config.privateKey.replace("0x", "")}`)
+            const client = createWalletClient({
+                account,
+                transport: http(config.rpcUrl)
+            })
+
+            const stakeAmount = parseEther(options.amount)
+            const payload = {
+                isInternalTx: true,
+                internalTXType: 6,
+                nominator: account.address.toLowerCase(),
+                timestamp: Math.floor(Date.now() / 1000),
+                nominee: options.node,
+                stake: stakeAmount
+            }
+
+            const transaction = {
+                to: "0x0000000000000000000000000000000000010000",
+                value: stakeAmount,
+                data: `0x${Buffer.from(JSON.stringify(payload)).toString("hex")}`,
+                gasLimit: 30000000
+            }
+
+            const hash = await client.sendTransaction(transaction)
+            formatOutput({
+                transactionHash: hash,
+                from: account.address,
+                ...transaction,
+                value: `${options.amount} SHM (${transaction.value.toString()} wei)`
+            })
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
+program
+    .command("shm:unstake")
+    .description("Unstake SHM tokens")
+    .requiredOption("-n, --node <publicKey>", "Node's public key")
+    .option("-f, --force", "Force unstake")
+    .action(async (options) => {
+        try {
+            const config = loadConfig()
+            if (!config.privateKey) {
+                throw new Error("Private key not configured. Use config:set-key to set it.")
+            }
+
+            const account = privateKeyToAccount(`0x${config.privateKey.replace("0x", "")}`)
+            const client = createWalletClient({
+                account,
+                transport: http(config.rpcUrl)
+            })
+
+            const payload = {
+                isInternalTx: true,
+                internalTXType: 7,
+                nominator: account.address.toLowerCase(),
+                timestamp: Math.floor(Date.now() / 1000),
+                nominee: options.node,
+                force: !!options.force
+            }
+
+            const transaction = {
+                to: "0x0000000000000000000000000000000000010000",
+                value: 0n,
+                data: `0x${Buffer.from(JSON.stringify(payload)).toString("hex")}`,
+                gasLimit: 30000000
+            }
+
+            const hash = await client.sendTransaction(transaction)
+            formatOutput({
+                transactionHash: hash,
+                from: account.address,
+                ...transaction
+            })
+        } catch (error) {
+            handleError(error)
+        }
+    })
+
 program.parse(process.argv)
 
 class NonceManager {
