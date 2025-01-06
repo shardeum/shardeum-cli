@@ -29,5 +29,8 @@
   },
   "bin": {
     "shardeum-cli": "dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
