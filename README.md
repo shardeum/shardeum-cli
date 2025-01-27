@@ -21,6 +21,9 @@ npm link
 # run with
 shardeum-cli <command>
 ```
+
+## Usage
+
 ```
 Usage: index [options] [command]
 
