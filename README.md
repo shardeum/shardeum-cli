@@ -1,7 +1,12 @@
 # shardeum-cli
 
 A command line utility to query Shardeum's functions and send transactions
-## Installation
+
+## Install
+
+`npm install -g @shardeum-foundation/shardeum-cli`
+
+## Installation from source
 
 ```bash
 # Build from source
