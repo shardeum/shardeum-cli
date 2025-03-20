@@ -1,6 +1,6 @@
 {
   "name": "@shardeum-foundation/shardeum-cli",
-  "version": "1.1.0-prerelease.1",
+  "version": "1.1.0-prerelease.2",
   "main": "index.js",
   "scripts": {
     "build": "tsc && node scripts/add-shebang.js",
